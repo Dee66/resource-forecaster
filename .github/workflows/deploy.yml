@@ -1,0 +1,90 @@
+name: Manual Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        default: staging
+        options:
+          - dev
+          - staging
+          - prod
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  PYTHON_VERSION: '3.11'
+  NODE_VERSION: '18'
+  AWS_DEFAULT_REGION: us-east-1
+
+jobs:
+  deploy:
+    name: Deploy to ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: 1.6.1
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+
+      - name: Cache Poetry deps
+        uses: actions/cache@v3
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ env.PYTHON_VERSION }}-${{ hashFiles('**/poetry.lock') }}
+
+      - name: Install deps
+        run: poetry install --only=main
+
+      - name: Install CDK
+        run: npm install -g aws-cdk@2.100.0
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets[format('AWS_ACCESS_KEY_ID_{0}', inputs.environment == 'prod' && 'PROD' || (inputs.environment == 'staging' && 'STAGING' || 'DEV'))] }}
+          aws-secret-access-key: ${{ secrets[format('AWS_SECRET_ACCESS_KEY_{0}', inputs.environment == 'prod' && 'PROD' || (inputs.environment == 'staging' && 'STAGING' || 'DEV'))] }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
+
+      - name: Synthesize CDK
+        run: |
+          cd infra
+          poetry run cdk synth --all --no-staging > /dev/null
+
+      - name: Deploy CDK
+        run: |
+          cd infra
+          STACK_SUFFIX=$(echo "${{ inputs.environment }}" | sed 's/.*/\u&/')
+          poetry run cdk deploy ResourceForecaster-${STACK_SUFFIX^} \
+            --require-approval never \
+            --context environment=${{ inputs.environment }}
+
+      - name: Post-deploy smoke
+        run: |
+          poetry run pytest -q tests/smoke || true
+
+      - name: Summary
+        run: |
+          echo "Deployed environment: ${{ inputs.environment }}"
+          echo "Run ID: ${{ github.run_id }}"

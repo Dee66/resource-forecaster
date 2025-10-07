@@ -1,0 +1,15 @@
+{
+  "environment": "dev",
+  "build_time": "2025-10-07T13:06:42Z",
+  "git_sha": null,
+  "includes": [
+    "src/forecaster/inference",
+    "src/forecaster/config.py",
+    "src/forecaster/exceptions.py",
+    "models",
+    "requirements.txt",
+    "pyproject.toml"
+  ],
+  "tool": "package_forecaster_artifacts.py",
+  "version": 1
+}

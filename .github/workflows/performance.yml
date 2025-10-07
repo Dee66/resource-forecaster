@@ -1,0 +1,552 @@
+name: Performance Testing
+
+on:
+  schedule:
+    # Run performance tests weekly on Sunday at 3 AM UTC
+    - cron: '0 3 * * 0'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to test'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+        - dev
+        - staging
+        - prod
+      duration:
+        description: 'Test duration in minutes'
+        required: true
+        default: '10'
+        type: string
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  load-testing:
+    name: API Load Testing
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install locust pytest-benchmark requests
+
+      - name: Create load test script
+        run: |
+          cat > load_test.py << 'EOF'
+          from locust import HttpUser, task, between
+          import json
+          import random
+          
+          class ForecasterUser(HttpUser):
+              wait_time = between(1, 3)
+              
+              def on_start(self):
+                  """Set up test data"""
+                  self.headers = {
+                      "Content-Type": "application/json",
+                      "Authorization": "Bearer test-token"
+                  }
+              
+              @task(3)
+              def get_forecast(self):
+                  """Test forecast endpoint"""
+                  payload = {
+                      "account_id": f"test-account-{random.randint(1, 100)}",
+                      "forecast_days": random.choice([7, 14, 30]),
+                      "include_recommendations": True
+                  }
+                  
+                  with self.client.post(
+                      "/forecast",
+                      json=payload,
+                      headers=self.headers,
+                      catch_response=True
+                  ) as response:
+                      if response.status_code == 200:
+                          data = response.json()
+                          if "predictions" in data:
+                              response.success()
+                          else:
+                              response.failure("Missing predictions in response")
+                      else:
+                          response.failure(f"Got status code {response.status_code}")
+              
+              @task(2)
+              def get_recommendations(self):
+                  """Test recommendations endpoint"""
+                  with self.client.get(
+                      f"/recommendations?account_id=test-account-{random.randint(1, 50)}",
+                      headers=self.headers,
+                      catch_response=True
+                  ) as response:
+                      if response.status_code == 200:
+                          response.success()
+                      else:
+                          response.failure(f"Got status code {response.status_code}")
+              
+              @task(1)
+              def health_check(self):
+                  """Test health endpoint"""
+                  with self.client.get("/health") as response:
+                      if response.status_code != 200:
+                          print(f"Health check failed: {response.status_code}")
+          EOF
+
+      - name: Run load test
+        env:
+          TARGET_HOST: ${{ vars.API_ENDPOINT_STAGING }}
+          TEST_DURATION: ${{ github.event.inputs.duration || '10' }}
+          ENVIRONMENT: ${{ github.event.inputs.environment || 'staging' }}
+        run: |
+          if [ -z "$TARGET_HOST" ]; then
+            echo "No API endpoint configured for environment, using mock endpoint"
+            TARGET_HOST="https://httpbin.org"
+          fi
+          
+          echo "Running load test against: $TARGET_HOST"
+          echo "Test duration: ${TEST_DURATION} minutes"
+          
+          locust -f load_test.py \
+            --host="$TARGET_HOST" \
+            --users=10 \
+            --spawn-rate=2 \
+            --run-time="${TEST_DURATION}m" \
+            --html=load-test-report.html \
+            --csv=load-test-results \
+            --headless
+
+      - name: Upload load test results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: load-test-results
+          path: |
+            load-test-report.html
+            load-test-results_*.csv
+
+  benchmark-testing:
+    name: Component Benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+
+      - name: Install dependencies
+        run: poetry install --with dev,test
+
+      - name: Run benchmark tests
+        run: |
+          poetry run pytest tests/performance/ \
+            --benchmark-only \
+            --benchmark-json=benchmark-results.json \
+            --benchmark-html=benchmark-report.html \
+            --benchmark-histogram=benchmark-histogram \
+            -v
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: benchmark-results
+          path: |
+            benchmark-results.json
+            benchmark-report.html
+            benchmark-histogram.svg
+
+  memory-profiling:
+    name: Memory Profiling
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Poetry and profiling tools
+        run: |
+          curl -sSL https://install.python-poetry.org | python3 -
+          poetry install --with dev,test
+          poetry add --group test memory-profiler py-spy
+
+      - name: Create memory profiling script
+        run: |
+          cat > memory_profile.py << 'EOF'
+          import time
+          import pandas as pd
+          import numpy as np
+          from memory_profiler import profile
+          
+          @profile
+          def simulate_data_processing():
+              """Simulate typical forecaster data processing"""
+              # Simulate loading cost data
+              data = pd.DataFrame({
+                  'date': pd.date_range('2023-01-01', periods=1000),
+                  'cost': np.random.normal(100, 20, 1000),
+                  'service': np.random.choice(['EC2', 'S3', 'RDS', 'Lambda'], 1000)
+              })
+              
+              # Simulate feature engineering
+              data['day_of_week'] = data['date'].dt.dayofweek
+              data['month'] = data['date'].dt.month
+              data['rolling_mean'] = data['cost'].rolling(window=7).mean()
+              
+              # Simulate model training data preparation
+              features = data[['day_of_week', 'month', 'rolling_mean']].fillna(0)
+              
+              # Simulate memory intensive operations
+              large_matrix = np.random.random((1000, 1000))
+              result = np.dot(large_matrix, large_matrix.T)
+              
+              return data, features, result
+          
+          if __name__ == "__main__":
+              print("Starting memory profiling...")
+              simulate_data_processing()
+              print("Memory profiling completed")
+          EOF
+
+      - name: Run memory profiling
+        run: |
+          poetry run python memory_profile.py > memory-profile.txt
+          
+          # Also use py-spy for sampling profiler
+          poetry run py-spy record -o py-spy-profile.svg -d 30 -- python -c "
+          import time
+          from memory_profile import simulate_data_processing
+          for i in range(5):
+              simulate_data_processing()
+              time.sleep(1)
+          " || echo "py-spy profiling completed with possible errors"
+
+      - name: Upload profiling results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: memory-profiling-results
+          path: |
+            memory-profile.txt
+            py-spy-profile.svg
+
+  database-performance:
+    name: Database Performance Testing
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: testpassword
+          POSTGRES_USER: testuser
+          POSTGRES_DB: testdb
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install psycopg2-binary sqlalchemy pandas pytest-benchmark
+
+      - name: Create database performance test
+        run: |
+          cat > db_performance_test.py << 'EOF'
+          import time
+          import pandas as pd
+          import numpy as np
+          from sqlalchemy import create_engine, text
+          import pytest
+          
+          DATABASE_URL = "postgresql://testuser:testpassword@localhost:5432/testdb"
+          
+          @pytest.fixture
+          def db_engine():
+              engine = create_engine(DATABASE_URL)
+              return engine
+          
+          def test_bulk_insert_performance(benchmark, db_engine):
+              """Test bulk insert performance"""
+              
+              def bulk_insert():
+                  # Create test data
+                  data = pd.DataFrame({
+                      'date': pd.date_range('2023-01-01', periods=10000),
+                      'cost': np.random.normal(100, 20, 10000),
+                      'service': np.random.choice(['EC2', 'S3', 'RDS'], 10000)
+                  })
+                  
+                  # Create table
+                  with db_engine.connect() as conn:
+                      conn.execute(text("""
+                          DROP TABLE IF EXISTS cost_data;
+                          CREATE TABLE cost_data (
+                              date DATE,
+                              cost DECIMAL(10,2),
+                              service VARCHAR(50)
+                          );
+                      """))
+                      conn.commit()
+                  
+                  # Bulk insert
+                  data.to_sql('cost_data', db_engine, if_exists='append', index=False)
+                  
+                  return len(data)
+              
+              result = benchmark(bulk_insert)
+              assert result == 10000
+          
+          def test_aggregation_performance(benchmark, db_engine):
+              """Test aggregation query performance"""
+              
+              def run_aggregation():
+                  query = """
+                  SELECT 
+                      service,
+                      DATE_TRUNC('month', date) as month,
+                      SUM(cost) as total_cost,
+                      AVG(cost) as avg_cost,
+                      COUNT(*) as count
+                  FROM cost_data 
+                  GROUP BY service, DATE_TRUNC('month', date)
+                  ORDER BY month, service;
+                  """
+                  
+                  with db_engine.connect() as conn:
+                      result = conn.execute(text(query))
+                      rows = result.fetchall()
+                      return len(rows)
+              
+              result = benchmark(run_aggregation)
+              assert result > 0
+          EOF
+
+      - name: Run database performance tests
+        run: |
+          python -m pytest db_performance_test.py \
+            --benchmark-json=db-benchmark-results.json \
+            --benchmark-html=db-benchmark-report.html \
+            -v
+
+      - name: Upload database performance results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: database-performance-results
+          path: |
+            db-benchmark-results.json
+            db-benchmark-report.html
+
+  aws-performance:
+    name: AWS Services Performance
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+        continue-on-error: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install boto3 pytest-benchmark
+
+      - name: Test AWS API performance
+        run: |
+          cat > aws_performance_test.py << 'EOF'
+          import boto3
+          import time
+          import pytest
+          from concurrent.futures import ThreadPoolExecutor, as_completed
+          
+          @pytest.fixture
+          def aws_clients():
+              return {
+                  'ce': boto3.client('ce'),
+                  'cloudwatch': boto3.client('cloudwatch'),
+                  's3': boto3.client('s3')
+              }
+          
+          def test_cost_explorer_performance(benchmark, aws_clients):
+              """Test Cost Explorer API performance"""
+              
+              def get_cost_data():
+                  try:
+                      response = aws_clients['ce'].get_cost_and_usage(
+                          TimePeriod={
+                              'Start': '2024-01-01',
+                              'End': '2024-01-31'
+                          },
+                          Granularity='DAILY',
+                          Metrics=['BlendedCost']
+                      )
+                      return len(response.get('ResultsByTime', []))
+                  except Exception as e:
+                      print(f"Cost Explorer API error: {e}")
+                      return 0
+              
+              result = benchmark(get_cost_data)
+              print(f"Retrieved {result} cost data points")
+          
+          def test_cloudwatch_metrics_performance(benchmark, aws_clients):
+              """Test CloudWatch metrics performance"""
+              
+              def get_metrics():
+                  try:
+                      response = aws_clients['cloudwatch'].list_metrics(
+                          Namespace='AWS/EC2',
+                          MetricName='CPUUtilization'
+                      )
+                      return len(response.get('Metrics', []))
+                  except Exception as e:
+                      print(f"CloudWatch API error: {e}")
+                      return 0
+              
+              result = benchmark(get_metrics)
+              print(f"Retrieved {result} CloudWatch metrics")
+          
+          def test_parallel_api_calls(benchmark, aws_clients):
+              """Test parallel API call performance"""
+              
+              def parallel_calls():
+                  def call_api(client_name):
+                      if client_name == 'ce':
+                          try:
+                              return aws_clients['ce'].get_cost_and_usage(
+                                  TimePeriod={'Start': '2024-01-01', 'End': '2024-01-02'},
+                                  Granularity='DAILY',
+                                  Metrics=['BlendedCost']
+                              )
+                          except:
+                              return None
+                      elif client_name == 'cloudwatch':
+                          try:
+                              return aws_clients['cloudwatch'].list_metrics(MaxRecords=10)
+                          except:
+                              return None
+                  
+                  with ThreadPoolExecutor(max_workers=3) as executor:
+                      futures = [
+                          executor.submit(call_api, 'ce'),
+                          executor.submit(call_api, 'cloudwatch')
+                      ]
+                      
+                      results = []
+                      for future in as_completed(futures):
+                          result = future.result()
+                          if result:
+                              results.append(result)
+                      
+                      return len(results)
+              
+              result = benchmark(parallel_calls)
+              print(f"Completed {result} parallel API calls")
+          EOF
+          
+          python -m pytest aws_performance_test.py \
+            --benchmark-json=aws-benchmark-results.json \
+            --benchmark-html=aws-benchmark-report.html \
+            -v || echo "AWS performance tests completed with possible errors"
+
+      - name: Upload AWS performance results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: aws-performance-results
+          path: |
+            aws-benchmark-results.json
+            aws-benchmark-report.html
+
+  performance-report:
+    name: Generate Performance Report
+    runs-on: ubuntu-latest
+    needs: [load-testing, benchmark-testing, memory-profiling, database-performance, aws-performance]
+    if: always()
+    steps:
+      - name: Download all performance results
+        uses: actions/download-artifact@v3
+
+      - name: Generate consolidated performance report
+        run: |
+          echo "# Performance Testing Report" > performance-report.md
+          echo "Generated: $(date)" >> performance-report.md
+          echo "" >> performance-report.md
+          
+          echo "## Test Results Summary" >> performance-report.md
+          echo "- Load Testing: ${{ needs.load-testing.result }}" >> performance-report.md
+          echo "- Component Benchmarks: ${{ needs.benchmark-testing.result }}" >> performance-report.md
+          echo "- Memory Profiling: ${{ needs.memory-profiling.result }}" >> performance-report.md
+          echo "- Database Performance: ${{ needs.database-performance.result }}" >> performance-report.md
+          echo "- AWS Performance: ${{ needs.aws-performance.result }}" >> performance-report.md
+          echo "" >> performance-report.md
+          
+          echo "## Performance Metrics" >> performance-report.md
+          echo "### API Performance" >> performance-report.md
+          if [ -f "load-test-results/load-test-results_stats.csv" ]; then
+            echo "Load test results available in artifacts" >> performance-report.md
+          fi
+          echo "" >> performance-report.md
+          
+          echo "### Memory Usage" >> performance-report.md
+          if [ -f "memory-profiling-results/memory-profile.txt" ]; then
+            echo "Memory profiling results available in artifacts" >> performance-report.md
+          fi
+          echo "" >> performance-report.md
+          
+          echo "## Recommendations" >> performance-report.md
+          echo "1. **Monitor response times** - Ensure API responses stay under 2 seconds" >> performance-report.md
+          echo "2. **Optimize memory usage** - Keep memory usage under 1GB per process" >> performance-report.md
+          echo "3. **Database optimization** - Consider indexing for frequent queries" >> performance-report.md
+          echo "4. **AWS API throttling** - Implement exponential backoff for API calls" >> performance-report.md
+          echo "5. **Caching strategy** - Implement caching for frequently accessed data" >> performance-report.md
+
+      - name: Upload consolidated report
+        uses: actions/upload-artifact@v3
+        with:
+          name: performance-report
+          path: performance-report.md

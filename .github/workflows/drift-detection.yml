@@ -1,0 +1,328 @@
+name: Infrastructure Drift Detection
+
+on:
+  schedule:
+    # Run drift detection daily at 8 AM UTC
+    - cron: '0 8 * * *'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to check for drift'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+        - dev
+        - staging
+        - prod
+
+env:
+  AWS_DEFAULT_REGION: us-east-1
+  PYTHON_VERSION: '3.11'
+  NODE_VERSION: '18'
+
+jobs:
+  drift-detection:
+    name: Infrastructure Drift Detection
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        environment: [dev, staging, prod]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets[format('AWS_ACCESS_KEY_ID_{0}', matrix.environment)] }}
+          aws-secret-access-key: ${{ secrets[format('AWS_SECRET_ACCESS_KEY_{0}', matrix.environment)] }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install CDK
+        run: npm install -g aws-cdk@2.100.0
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+
+      - name: Install dependencies
+        run: poetry install
+
+      - name: Generate current CloudFormation templates
+        run: |
+          cd infra
+          poetry run cdk synth --all --no-staging \
+            --context environment=${{ matrix.environment }}
+
+      - name: Check for stack drift
+        id: drift-check
+        run: |
+          cd infra
+          
+          # Get deployed stack name
+          STACK_NAME="ResourceForecaster-$(echo ${{ matrix.environment }} | sed 's/.*/\u&/')"
+          
+          # Check if stack exists
+          if aws cloudformation describe-stacks --stack-name $STACK_NAME >/dev/null 2>&1; then
+            echo "Checking drift for stack: $STACK_NAME"
+            
+            # Start drift detection
+            DRIFT_ID=$(aws cloudformation detect-stack-drift \
+              --stack-name $STACK_NAME \
+              --query 'StackDriftDetectionId' \
+              --output text)
+            
+            echo "Drift detection started with ID: $DRIFT_ID"
+            
+            # Wait for drift detection to complete
+            while true; do
+              STATUS=$(aws cloudformation describe-stack-drift-detection-status \
+                --stack-drift-detection-id $DRIFT_ID \
+                --query 'DetectionStatus' \
+                --output text)
+              
+              if [ "$STATUS" = "DETECTION_COMPLETE" ]; then
+                break
+              elif [ "$STATUS" = "DETECTION_FAILED" ]; then
+                echo "Drift detection failed"
+                exit 1
+              fi
+              
+              echo "Waiting for drift detection to complete... Status: $STATUS"
+              sleep 10
+            done
+            
+            # Get drift results
+            DRIFT_STATUS=$(aws cloudformation describe-stack-drift-detection-status \
+              --stack-drift-detection-id $DRIFT_ID \
+              --query 'StackDriftStatus' \
+              --output text)
+            
+            echo "drift_status=$DRIFT_STATUS" >> $GITHUB_OUTPUT
+            echo "stack_name=$STACK_NAME" >> $GITHUB_OUTPUT
+            
+            if [ "$DRIFT_STATUS" = "DRIFTED" ]; then
+              echo "🚨 DRIFT DETECTED in ${{ matrix.environment }} environment!"
+              
+              # Get detailed drift information
+              aws cloudformation describe-stack-resource-drifts \
+                --stack-name $STACK_NAME \
+                --stack-resource-drift-status-filters MODIFIED DELETED \
+                --query 'StackResourceDrifts[*].[LogicalResourceId,ResourceType,StackResourceDriftStatus]' \
+                --output table > drift-details-${{ matrix.environment }}.txt
+              
+              echo "Drift details saved to drift-details-${{ matrix.environment }}.txt"
+            else
+              echo "✅ No drift detected in ${{ matrix.environment }} environment"
+            fi
+          else
+            echo "Stack $STACK_NAME does not exist, skipping drift check"
+            echo "drift_status=NOT_DEPLOYED" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Compare with expected template
+        if: steps.drift-check.outputs.drift_status == 'DRIFTED'
+        run: |
+          cd infra
+          
+          STACK_NAME="${{ steps.drift-check.outputs.stack_name }}"
+          
+          # Get deployed template
+          aws cloudformation get-template \
+            --stack-name $STACK_NAME \
+            --query 'TemplateBody' > deployed-template-${{ matrix.environment }}.json
+          
+          # Compare with generated template
+          GENERATED_TEMPLATE="cdk.out/${STACK_NAME}.template.json"
+          
+          if [ -f "$GENERATED_TEMPLATE" ]; then
+            echo "Comparing deployed template with generated template..."
+            
+            # Use jq to normalize and compare templates
+            if command -v jq >/dev/null 2>&1; then
+              jq --sort-keys . deployed-template-${{ matrix.environment }}.json > deployed-normalized.json
+              jq --sort-keys . "$GENERATED_TEMPLATE" > generated-normalized.json
+              
+              if ! diff -u deployed-normalized.json generated-normalized.json > template-diff-${{ matrix.environment }}.txt; then
+                echo "Template differences found"
+              else
+                echo "Templates are identical (drift might be in resource properties)"
+              fi
+            fi
+          fi
+
+      - name: Upload drift reports
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: drift-reports-${{ matrix.environment }}
+          path: |
+            infra/drift-details-${{ matrix.environment }}.txt
+            infra/template-diff-${{ matrix.environment }}.txt
+            infra/deployed-template-${{ matrix.environment }}.json
+
+      - name: Create drift issue (if needed)
+        if: steps.drift-check.outputs.drift_status == 'DRIFTED'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const environment = '${{ matrix.environment }}';
+            const stackName = '${{ steps.drift-check.outputs.stack_name }}';
+            
+            // Check if there's already an open drift issue for this environment
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: ['infrastructure-drift', `environment:${environment}`]
+            });
+            
+            if (issues.data.length === 0) {
+              // Create new drift issue
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `🚨 Infrastructure Drift Detected - ${environment.toUpperCase()}`,
+                body: `
+            ## Infrastructure Drift Alert
+            
+            **Environment:** ${environment}
+            **Stack:** ${stackName}
+            **Detection Time:** ${new Date().toISOString()}
+            
+            Infrastructure drift has been detected in the ${environment} environment. This means the deployed infrastructure differs from the expected state defined in the CDK code.
+            
+            ### Next Steps:
+            1. Review the drift details in the workflow artifacts
+            2. Determine if the changes are intentional or unauthorized
+            3. If unauthorized: investigate the source and restore the expected state
+            4. If intentional: update the CDK code to match the current state
+            5. Re-deploy to eliminate drift
+            
+            ### Files to Review:
+            - \`drift-details-${environment}.txt\` - Detailed drift information
+            - \`template-diff-${environment}.txt\` - Template differences
+            - \`deployed-template-${environment}.json\` - Current deployed template
+            
+            **Workflow Run:** [#${context.runNumber}](${context.payload.repository.html_url}/actions/runs/${context.runId})
+                `,
+                labels: ['infrastructure-drift', `environment:${environment}`, 'urgent']
+              });
+            }
+
+  cost-drift-analysis:
+    name: Cost Drift Analysis
+    runs-on: ubuntu-latest
+    needs: drift-detection
+    if: always()
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
+
+      - name: Check for unexpected cost increases
+        run: |
+          echo "Analyzing cost trends for drift-related impact..."
+          
+          # Get current month costs
+          CURRENT_MONTH=$(date +%Y-%m-01)
+          NEXT_MONTH=$(date -d "+1 month" +%Y-%m-01)
+          
+          # Get cost data
+          aws ce get-cost-and-usage \
+            --time-period Start=$CURRENT_MONTH,End=$NEXT_MONTH \
+            --granularity MONTHLY \
+            --metrics "BlendedCost" \
+            --group-by Type=DIMENSION,Key=SERVICE \
+            --filter file://<(echo '{
+              "Tags": {
+                "Key": "App",
+                "Values": ["ResourceForecaster"]
+              }
+            }') > current-costs.json
+          
+          # Compare with expected costs (placeholder)
+          echo "Cost analysis completed. Review current-costs.json for details."
+
+      - name: Upload cost analysis
+        uses: actions/upload-artifact@v3
+        with:
+          name: cost-drift-analysis
+          path: current-costs.json
+
+  remediation-plan:
+    name: Generate Remediation Plan
+    runs-on: ubuntu-latest
+    needs: [drift-detection, cost-drift-analysis]
+    if: always()
+    steps:
+      - name: Download drift reports
+        uses: actions/download-artifact@v3
+
+      - name: Generate remediation plan
+        run: |
+          echo "# Infrastructure Drift Remediation Plan" > remediation-plan.md
+          echo "Generated: $(date)" >> remediation-plan.md
+          echo "" >> remediation-plan.md
+          
+          echo "## Summary" >> remediation-plan.md
+          echo "This document outlines the steps to remediate infrastructure drift detected in the Resource Forecaster environments." >> remediation-plan.md
+          echo "" >> remediation-plan.md
+          
+          echo "## Affected Environments" >> remediation-plan.md
+          for env in dev staging prod; do
+            if [ -f "drift-reports-${env}/drift-details-${env}.txt" ]; then
+              echo "- **${env}**: Drift detected ⚠️" >> remediation-plan.md
+            else
+              echo "- **${env}**: No drift detected ✅" >> remediation-plan.md
+            fi
+          done
+          echo "" >> remediation-plan.md
+          
+          echo "## Immediate Actions Required" >> remediation-plan.md
+          echo "1. **Stop any manual changes** to the affected infrastructure" >> remediation-plan.md
+          echo "2. **Investigate the source** of unauthorized changes" >> remediation-plan.md
+          echo "3. **Review security logs** for any suspicious activity" >> remediation-plan.md
+          echo "4. **Document approved changes** in the CDK code" >> remediation-plan.md
+          echo "" >> remediation-plan.md
+          
+          echo "## Recovery Steps" >> remediation-plan.md
+          echo "1. \`git checkout main\`" >> remediation-plan.md
+          echo "2. \`cd infra\`" >> remediation-plan.md
+          echo "3. \`poetry run cdk diff ResourceForecaster-<Environment>\`" >> remediation-plan.md
+          echo "4. \`poetry run cdk deploy ResourceForecaster-<Environment>\`" >> remediation-plan.md
+          echo "" >> remediation-plan.md
+          
+          echo "## Prevention Measures" >> remediation-plan.md
+          echo "- Implement AWS Config rules for compliance monitoring" >> remediation-plan.md
+          echo "- Set up CloudTrail for audit logging" >> remediation-plan.md
+          echo "- Use IAM policies to restrict manual infrastructure changes" >> remediation-plan.md
+          echo "- Increase drift detection frequency for critical environments" >> remediation-plan.md
+
+      - name: Upload remediation plan
+        uses: actions/upload-artifact@v3
+        with:
+          name: remediation-plan
+          path: remediation-plan.md
+
+      - name: Send drift notification
+        run: |
+          echo "Sending drift detection notifications..."
+          # Add Slack/Teams/Email notification logic here
+          echo "📧 Drift detection report and remediation plan generated"

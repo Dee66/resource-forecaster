@@ -1,0 +1,179 @@
+[tool.poetry]
+name = "resource-forecaster"
+version = "0.1.0"
+description = "Enterprise MLOps platform for predictive cost forecasting and FinOps automation"
+authors = ["ShieldCraft AI <engineering@shieldcraft.ai>"]
+readme = "README.md"
+packages = [{include = "forecaster", from = "src"}]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+# Time-series and regression dependencies
+prophet = "^1.1.4"
+scikit-learn = "^1.3.0"
+pandas = "^2.0.0"
+numpy = "^1.24.0"
+scipy = "^1.10.0"
+statsmodels = "^0.14.0"
+# AWS and cloud dependencies
+boto3 = "^1.28.0"
+botocore = "^1.31.0"
+aws-cdk-lib = "^2.90.0"
+constructs = "^10.0.0"
+# Data processing and validation
+pydantic = "^2.0.0"
+great-expectations = "^0.17.0"
+# Monitoring and observability
+prometheus-client = "^0.17.0"
+# API and service dependencies
+fastapi = "^0.100.0"
+uvicorn = "^0.23.0"
+starlette = "^0.27.0"
+# Utilities
+click = "^8.1.0"
+rich = "^13.0.0"
+typer = "^0.9.0"
+loguru = "^0.7.0"
+pytest-asyncio = "^0.21.0"
+joblib = "^1.5.2"
+
+[tool.poetry.group.dev.dependencies]
+# Testing
+pytest = "^7.4.0"
+pytest-cov = "^4.1.0"
+pytest-mock = "^3.11.0"
+pytest-xdist = "^3.3.0"
+pytest-benchmark = "^4.0.0"
+# Linting and formatting
+ruff = "^0.0.280"
+black = "^23.7.0"
+isort = "^5.12.0"
+mypy = "^1.5.0"
+# Documentation
+mkdocs = "^1.5.0"
+mkdocs-material = "^9.1.0"
+mkdocstrings = "^0.22.0"
+# Development tools
+nox = "^2023.4.22"
+pre-commit = "^3.3.0"
+# Jupyter for analysis
+jupyter = "^1.0.0"
+ipykernel = "^6.25.0"
+matplotlib = "^3.7.0"
+seaborn = "^0.12.0"
+plotly = "^5.15.0"
+
+[tool.poetry.scripts]
+forecaster = "forecaster.cli:main"
+forecast-train = "forecaster.train.forecaster_train:main"
+forecast-predict = "forecaster.inference.forecaster_handler:main"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.black]
+line-length = 100
+target-version = ['py311']
+include = '\.pyi?$'
+extend-exclude = '''
+# A regex preceded by the string literal prefix "r" or triple quoted strings
+(
+  /(
+      \.eggs         # exclude a few common directories in the
+    | \.git          # root of the project
+    | \.hg
+    | \.mypy_cache
+    | \.tox
+    | \.venv
+    | _build
+    | buck-out
+    | build
+    | dist
+  )/
+  | foo.py           # also separately exclude a file named foo.py in
+                     # the root of the project
+)
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 100
+multi_line_output = 3
+include_trailing_comma = true
+force_grid_wrap = 0
+use_parentheses = true
+ensure_newline_before_comments = true
+
+[tool.ruff]
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort
+    "C",  # flake8-comprehensions
+    "B",  # flake8-bugbear
+    "UP", # pyupgrade
+]
+ignore = [
+    "E501",  # line too long, handled by black
+    "B008",  # do not perform function calls in argument defaults
+    "C901",  # too complex
+]
+fixable = ["ALL"]
+unfixable = []
+target-version = "py311"
+line-length = 100
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-ra -q --strict-markers --strict-config"
+testpaths = [
+    "tests",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "forecast: marks tests as forecast-specific",
+    "finops: marks tests as FinOps-related",
+]
+
+[tool.coverage.run]
+source = ["src"]
+omit = [
+    "*/tests/*",
+    "*/test_*.py",
+    "*/__init__.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if self.debug:",
+    "if settings.DEBUG",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if 0:",
+    "if __name__ == .__main__.:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+]
+show_missing = true
+skip_covered = true
+fail_under = 80

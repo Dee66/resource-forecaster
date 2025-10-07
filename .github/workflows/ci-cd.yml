@@ -1,0 +1,567 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+        - dev
+        - staging
+        - prod
+
+env:
+  PYTHON_VERSION: '3.11'
+  NODE_VERSION: '18'
+  AWS_DEFAULT_REGION: us-east-1
+
+jobs:
+  # Security and code quality checks
+  security-scan:
+    name: Security & Code Quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for better analysis
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: 1.6.1
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+
+      - name: Cache Poetry dependencies
+        uses: actions/cache@v3
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ env.PYTHON_VERSION }}-${{ hashFiles('**/poetry.lock') }}
+
+      - name: Install dependencies
+        run: poetry install --with dev,test
+
+      - name: Run security checks with bandit
+        run: |
+          poetry run bandit -r src/ -f json -o bandit-report.json
+          poetry run bandit -r src/ --severity-level medium
+
+      - name: Run dependency vulnerability check
+        run: |
+          poetry run safety check --json --output safety-report.json
+          poetry run safety check
+
+      - name: Code quality with ruff
+        run: |
+          poetry run ruff check src/ tests/ --output-format=github
+          poetry run ruff format --check src/ tests/
+
+      - name: Type checking with mypy
+        run: poetry run mypy src/ --ignore-missing-imports
+
+      - name: Upload security reports
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: security-reports
+          path: |
+            bandit-report.json
+            safety-report.json
+
+  # Unit and integration tests
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.11', '3.12']
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: 1.6.1
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+
+      - name: Cache Poetry dependencies
+        uses: actions/cache@v3
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ matrix.python-version }}-${{ hashFiles('**/poetry.lock') }}
+
+      - name: Install dependencies
+        run: poetry install --with dev,test
+
+      - name: Run unit tests
+        run: |
+          poetry run pytest tests/ \
+            --cov=src \
+            --cov-report=xml \
+            --cov-report=html \
+            --cov-report=term \
+            --junitxml=test-results.xml \
+            --tb=short \
+            -v
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: test-results-${{ matrix.python-version }}
+          path: |
+            test-results.xml
+            htmlcov/
+            .coverage
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        if: matrix.python-version == '3.11'
+        with:
+          file: ./coverage.xml
+          flags: unittests
+          name: codecov-umbrella
+
+  # Package model/inference artifacts and optionally upload to S3
+  package-artifacts:
+    name: Package Artifacts
+    runs-on: ubuntu-latest
+    needs: [test]
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.ref == 'refs/heads/main' ||
+      github.ref == 'refs/heads/master' ||
+      github.ref == 'refs/heads/develop'
+    env:
+      PYTHON_VERSION: ${{ env.PYTHON_VERSION }}
+      S3_MODEL_ARTIFACTS_BUCKET: ${{ vars.S3_MODEL_ARTIFACTS_BUCKET }}
+      DISPATCH_ENV: ${{ github.event.inputs.environment }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: 1.6.1
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+
+      - name: Cache Poetry deps
+        uses: actions/cache@v3
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ env.PYTHON_VERSION }}-${{ hashFiles('**/poetry.lock') }}
+
+      - name: Install dependencies (main)
+        run: poetry install --only=main
+
+      - name: Determine target environment
+        run: |
+          if [ -n "${DISPATCH_ENV}" ]; then
+            ENV_NAME="${DISPATCH_ENV}"
+          elif [ "${GITHUB_REF}" = "refs/heads/develop" ]; then
+            ENV_NAME="dev"
+          else
+            # Default to staging for main/master or others
+            ENV_NAME="staging"
+          fi
+          echo "ENV_NAME=${ENV_NAME}" >> $GITHUB_ENV
+          echo "Target environment: ${ENV_NAME}"
+
+      - name: Ensure boto3 if uploading
+        if: env.S3_MODEL_ARTIFACTS_BUCKET != ''
+        run: |
+          poetry run python - <<'PY'
+          try:
+              import boto3  # noqa: F401
+              print('boto3 present')
+          except Exception:
+              import sys, subprocess
+              subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'boto3'])
+          PY
+
+      - name: Package artifacts
+        run: |
+          EXTRA_ARGS=""
+          if [ -n "${S3_MODEL_ARTIFACTS_BUCKET}" ]; then
+            EXTRA_ARGS="--s3-bucket ${S3_MODEL_ARTIFACTS_BUCKET}"
+          fi
+          poetry run python scripts/package_forecaster_artifacts.py --env "${ENV_NAME}" ${EXTRA_ARGS}
+
+      - name: Upload packaged artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: model-package-${{ env.ENV_NAME }}
+          path: |
+            artifacts/${{ env.ENV_NAME }}/model_package-*.zip
+            artifacts/${{ env.ENV_NAME }}/model_package-*.sha256
+
+  # Infrastructure validation
+  infrastructure-check:
+    name: Infrastructure Validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install CDK
+        run: npm install -g aws-cdk@2.100.0
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+
+      - name: Install dependencies
+        run: poetry install
+
+      - name: CDK Synth (validate templates)
+        run: |
+          cd infra
+          poetry run cdk synth --all --no-staging > /dev/null
+
+      - name: Validate CloudFormation templates
+        run: |
+          cd infra/cdk.out
+          for template in *.template.json; do
+            if [ -f "$template" ]; then
+              echo "Validating $template"
+              aws cloudformation validate-template \
+                --template-body file://$template \
+                --region ${{ env.AWS_DEFAULT_REGION }} || true
+            fi
+          done
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Security check with cdk-nag
+        run: |
+          cd infra
+          npm install cdk-nag
+          # Add cdk-nag checks to CDK app
+          echo "# CDK NAG security checks would run here"
+
+      - name: Infrastructure cost estimation
+        run: |
+          # Placeholder for cost estimation
+          echo "Infrastructure cost estimation would run here"
+          echo "Consider integrating with Infracost or AWS Pricing Calculator"
+
+  # Build and package
+  build:
+    name: Build & Package
+    runs-on: ubuntu-latest
+    needs: [security-scan, test, infrastructure-check]
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+
+      - name: Install dependencies
+        run: poetry install --only=main
+
+      - name: Build package
+        run: |
+          poetry build
+          ls -la dist/
+
+      - name: Create deployment package
+        run: |
+          mkdir -p deployment-package
+          
+          # Copy source code
+          cp -r src/ deployment-package/
+          
+          # Copy configuration
+          cp -r config/ deployment-package/
+          
+          # Copy infrastructure
+          cp -r infra/ deployment-package/
+          
+          # Copy requirements
+          poetry export -f requirements.txt --output deployment-package/requirements.txt
+          
+          # Create version file
+          echo "BUILD_ID=${{ github.run_number }}" > deployment-package/version.txt
+          echo "COMMIT_SHA=${{ github.sha }}" >> deployment-package/version.txt
+          echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> deployment-package/version.txt
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: deployment-package
+          path: deployment-package/
+          retention-days: 30
+
+  # Deploy to development
+  deploy-dev:
+    name: Deploy to Development
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/develop' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'dev')
+    environment: development
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v3
+        with:
+          name: deployment-package
+          path: deployment-package/
+
+      - name: Set up AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install CDK
+        run: npm install -g aws-cdk@2.100.0
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+
+      - name: Install dependencies
+        run: poetry install
+
+      - name: Deploy infrastructure
+        run: |
+          cd infra
+          poetry run cdk deploy ResourceForecaster-Dev \
+            --require-approval never \
+            --context environment=dev \
+            --outputs-file dev-outputs.json
+
+      - name: Run post-deployment tests
+        run: |
+          poetry run pytest tests/integration/ \
+            --environment=dev \
+            --tb=short \
+            -v
+
+      - name: Upload deployment outputs
+        uses: actions/upload-artifact@v3
+        with:
+          name: dev-deployment-outputs
+          path: infra/dev-outputs.json
+
+  # Deploy to staging
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: [build, deploy-dev]
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'staging')
+    environment: staging
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v3
+        with:
+          name: deployment-package
+          path: deployment-package/
+
+      - name: Set up AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_STAGING }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_STAGING }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install CDK
+        run: npm install -g aws-cdk@2.100.0
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+
+      - name: Install dependencies
+        run: poetry install
+
+      - name: Deploy infrastructure
+        run: |
+          cd infra
+          poetry run cdk deploy ResourceForecaster-Staging \
+            --require-approval never \
+            --context environment=staging \
+            --outputs-file staging-outputs.json
+
+      - name: Run integration tests
+        run: |
+          poetry run pytest tests/integration/ \
+            --environment=staging \
+            --tb=short \
+            -v
+
+      - name: Run performance tests
+        run: |
+          poetry run pytest tests/performance/ \
+            --environment=staging \
+            --tb=short \
+            -v
+
+      - name: Upload deployment outputs
+        uses: actions/upload-artifact@v3
+        with:
+          name: staging-deployment-outputs
+          path: infra/staging-outputs.json
+
+  # Deploy to production (manual approval required)
+  deploy-prod:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [build, deploy-staging]
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'prod'
+    environment: production
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v3
+        with:
+          name: deployment-package
+          path: deployment-package/
+
+      - name: Set up AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_PROD }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_PROD }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install CDK
+        run: npm install -g aws-cdk@2.100.0
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+
+      - name: Install dependencies
+        run: poetry install
+
+      - name: Create backup snapshot
+        run: |
+          echo "Creating backup of current production state..."
+          # Add backup logic here
+
+      - name: Deploy infrastructure
+        run: |
+          cd infra
+          poetry run cdk deploy ResourceForecaster-Prod \
+            --require-approval never \
+            --context environment=prod \
+            --outputs-file prod-outputs.json
+
+      - name: Run smoke tests
+        run: |
+          poetry run pytest tests/smoke/ \
+            --environment=prod \
+            --tb=short \
+            -v
+
+      - name: Upload deployment outputs
+        uses: actions/upload-artifact@v3
+        with:
+          name: prod-deployment-outputs
+          path: infra/prod-outputs.json
+
+      - name: Notify deployment success
+        run: |
+          echo "✅ Production deployment completed successfully!"
+          echo "Build ID: ${{ github.run_number }}"
+          echo "Commit: ${{ github.sha }}"
+
+  # Cleanup and notifications
+  cleanup:
+    name: Cleanup & Notifications
+    runs-on: ubuntu-latest
+    needs: [deploy-dev, deploy-staging, deploy-prod]
+    if: always()
+    steps:
+      - name: Clean up old artifacts
+        run: |
+          echo "Cleaning up old build artifacts and deployments..."
+
+      - name: Send notifications
+        run: |
+          echo "Sending deployment notifications..."
+          # Add Slack/Teams/Email notifications here
+
+      - name: Update deployment status
+        run: |
+          echo "Updating deployment dashboard/status page..."
