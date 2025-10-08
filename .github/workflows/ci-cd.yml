@@ -54,6 +54,20 @@ jobs:
       - name: Install dependencies
         run: poetry install --with dev,test
 
+      - name: Run budget guardrail (fail-fast)
+        if: matrix.python-version == '3.11'
+        env:
+          # Expose repo variables for all environments; the script will pick the right one via --env
+          BUDGET: ${{ vars.BUDGET }}
+          BUDGET_DEV: ${{ vars.BUDGET_DEV }}
+          BUDGET_STAGING: ${{ vars.BUDGET_STAGING }}
+          BUDGET_PROD: ${{ vars.BUDGET_PROD }}
+          # Determine target environment based on PR base branch or push branch
+          GUARDRAIL_TARGET: ${{ (github.event_name == 'pull_request' && (github.event.pull_request.base.ref == 'develop') && 'dev') || (github.event_name == 'pull_request' && (github.event.pull_request.base.ref == 'main' || github.event.pull_request.base.ref == 'master') && 'prod') || (github.ref == 'refs/heads/develop' && 'dev') || (github.ref == 'refs/heads/main' && 'prod') || (github.ref == 'refs/heads/master' && 'prod') || 'staging' }}
+        run: |
+          echo "Guardrail target environment: $GUARDRAIL_TARGET"
+          python scripts/section11_budget_guardrail.py --predicted-json dashboards/predicted_cost.json --budget 1000 --env $GUARDRAIL_TARGET --block-exit
+
       - name: Run security checks with bandit
         run: |
           poetry run bandit -r src/ -f json -o bandit-report.json
@@ -113,7 +127,11 @@ jobs:
       - name: Install dependencies
         run: poetry install --with dev,test
 
-      - name: Run unit tests
+      - name: Run unit tests (fast fail for new tests)
+        run: |
+          poetry run pytest tests/test_retrain_lambda.py tests/test_shutdown_lambda.py -q
+
+      - name: Run full unit tests
         run: |
           poetry run pytest tests/ \
             --cov=src \

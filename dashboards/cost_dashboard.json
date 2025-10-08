@@ -1,0 +1,111 @@
+{
+  "widgets": [
+    {
+      "type": "metric",
+      "x": 0,
+      "y": 0,
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "metrics": [
+          [
+            "AWS/Billing",
+            "EstimatedCharges",
+            "Currency",
+            "USD",
+            {
+              "stat": "Maximum"
+            }
+          ],
+          [
+            "ResourceForecaster/Cost",
+            "PredictedDailyCost",
+            "Environment",
+            "dev"
+          ],
+          [
+            "...",
+            "staging"
+          ],
+          [
+            "...",
+            "prod"
+          ]
+        ],
+        "view": "timeSeries",
+        "stacked": false,
+        "region": "us-east-1",
+        "title": "Cost: Actual vs Predicted",
+        "period": 86400,
+        "annotations": {
+          "horizontal": [
+            {
+              "label": "Budget Alert Threshold",
+              "value": 1000
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12,
+      "y": 0,
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "metrics": [
+          [
+            "ResourceForecaster/Cost",
+            "DailyVariance",
+            "Environment",
+            "dev"
+          ],
+          [
+            "...",
+            "staging"
+          ],
+          [
+            "...",
+            "prod"
+          ]
+        ],
+        "view": "timeSeries",
+        "stacked": false,
+        "region": "us-east-1",
+        "title": "Daily Cost Variance (%)",
+        "period": 86400
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0,
+      "y": 6,
+      "width": 24,
+      "height": 6,
+      "properties": {
+        "metrics": [
+          [
+            "ResourceForecaster/Recommendations",
+            "PotentialSavings",
+            "Type",
+            "Rightsizing"
+          ],
+          [
+            "...",
+            "ReservedInstances"
+          ],
+          [
+            "...",
+            "SavingsPlans"
+          ]
+        ],
+        "view": "timeSeries",
+        "stacked": true,
+        "region": "us-east-1",
+        "title": "Cost Optimization Opportunities ($)",
+        "period": 86400
+      }
+    }
+  ]
+}

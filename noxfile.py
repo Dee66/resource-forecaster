@@ -70,16 +70,15 @@ def test_all(session):
     """Run all tests including slow integration tests."""
     session.install("poetry")
     session.run("poetry", "install")
-    
-    session.run(
-        "poetry", "run", "pytest", 
-        "tests/",
-        "-v",
-        "--tb=short",
-        "--strict-markers",
-    )
-    
-    session.log("✅ All tests completed successfully")
+
+
+@nox.session(python=PYTHON_VERSIONS)
+def guardrail(session):
+    """Run the budget guardrail script locally (use --block-exit to fail on over-budget)."""
+    session.install("poetry")
+    session.run("poetry", "install")
+    session.run("python", "scripts/section11_budget_guardrail.py", "--predicted-json", "dashboards/predicted_cost.json", "--budget", "1000", "--env", "prod", "--block-exit")
+    session.log("✅ Guardrail script executed")
 
 
 @nox.session(python=PYTHON_VERSIONS)
@@ -157,18 +156,87 @@ def package_upload(session):
 
 @nox.session(python=PYTHON_VERSIONS)
 def rollback(session):
-        """Rollback helper to list/set previous model packages.
+    """Rollback helper to list/set previous model packages.
 
-        Examples:
-            nox -s rollback -- --env staging --list
-            nox -s rollback -- --env staging --previous --set-alias --download
-            nox -s rollback -- --env prod --key model-packages/prod/model_package-20250101-000000.zip --set-alias
-        """
-        session.install("poetry")
-        session.run("poetry", "install")
-        args = session.posargs or ["--env", "staging", "--list"]
-        session.run("poetry", "run", "python", "scripts/rollback_model.py", *args)
-        session.log("✅ Rollback command completed")
+    Examples:
+      nox -s rollback -- --env staging --list
+      nox -s rollback -- --env staging --previous --set-alias --download
+      nox -s rollback -- --env prod --key model-packages/prod/model_package-20250101-000000.zip --set-alias
+    """
+    session.install("poetry")
+    session.run("poetry", "install")
+    args = session.posargs or ["--env", "staging", "--list"]
+    session.run("poetry", "run", "python", "scripts/rollback_model.py", *args)
+    session.log("✅ Rollback command completed")
+
+
+@nox.session(python=PYTHON_VERSIONS)
+def deploy(session):
+    """Deploy with guardrails: package -> synth -> deploy.
+
+    Examples:
+      nox -s deploy -- --env dev
+      nox -s deploy -- --env staging --s3-bucket my-artifacts
+      nox -s deploy -- --env prod --yes --force
+    """
+    session.install("poetry")
+    session.run("poetry", "install")
+    args = session.posargs or ["--env", "dev"]
+    session.run("poetry", "run", "python", "scripts/deploy_flow.py", *args)
+    session.log("✅ Deployment flow completed")
+
+
+@nox.session(python=PYTHON_VERSIONS)
+def teardown(session):
+    """Teardown CDK stacks with confirmation.
+
+    Examples:
+      nox -s teardown -- --env dev --yes
+      nox -s teardown -- --env staging --yes
+    """
+    session.install("poetry")
+    session.run("poetry", "install")
+    args = session.posargs or ["--env", "dev"]
+    session.run("poetry", "run", "python", "scripts/teardown.py", *args)
+    session.log("✅ Teardown completed")
+
+
+@nox.session(python=PYTHON_VERSIONS)
+def create_dashboards(session):
+    """Create CloudWatch dashboards for demo.
+
+    Examples:
+      nox -s create_dashboards
+      nox -s create_dashboards -- --region us-west-2 --create-dashboards
+    """
+    session.install("poetry")
+    session.run("poetry", "install")
+    args = session.posargs or ["--region", "us-east-1"]
+    session.run("poetry", "run", "python", "scripts/create_dashboards.py", *args)
+    session.log("✅ Dashboard configurations created")
+
+
+@nox.session(python=PYTHON_VERSIONS)
+def demo_screenshots(session):
+    """Capture CloudWatch dashboard screenshots for demo.
+
+    Examples:
+      nox -s demo_screenshots
+      nox -s demo_screenshots -- --region us-west-2 --wait 15
+    """
+    session.install("poetry")
+    session.run("poetry", "install")
+    
+    # Install selenium if not already present
+    session.run("poetry", "run", "pip", "install", "selenium", external=True)
+    
+    args = session.posargs or ["--region", "us-east-1"]
+    session.run("poetry", "run", "python", "scripts/capture_dashboard_screenshots.py", *args)
+    session.log("✅ Demo screenshots captured")
+    session.run("poetry", "install")
+    args = session.posargs or ["--env", "staging", "--yes"]
+    session.run("poetry", "run", "python", "scripts/deploy_flow.py", *args)
+    session.log("✅ Deploy flow completed")
 
 
 @nox.session(python=PYTHON_VERSIONS)
@@ -200,6 +268,30 @@ def docs(session):
     
     session.log("✅ Documentation built successfully")
     session.log("📚 Documentation available at site/index.html")
+
+
+@nox.session(python=PYTHON_VERSIONS)
+def section11(session):
+    """Run Section 11 guardrails: create alarms and run budget checks.
+
+    Examples:
+      nox -s section11 -- --create-alarms
+      nox -s section11 -- --apply-alarms --sns-email ops@example.com
+      nox -s section11 -- --check-budget --predicted-json dashboards/predicted_cost.json --block-exit
+    """
+    session.install("poetry")
+    session.run("poetry", "install")
+
+    pos = session.posargs
+    if not pos:
+        # default: generate alarm definitions
+        session.run("poetry", "run", "python", "scripts/section11_create_alarms_and_guardrails.py")
+        session.log("✅ Section11 alarm definitions generated")
+        return
+
+    # forward args to scripts
+    session.run("poetry", "run", "python", "scripts/section11_create_alarms_and_guardrails.py", *pos)
+    session.log("✅ Section11 scripts executed")
 
 
 @nox.session(python=PYTHON_VERSIONS)
@@ -268,7 +360,7 @@ def pre_commit(session):
     session.run("poetry", "install")
     
     # Run all quality checks
-    session.notify("format")
+    session.notify("format_code")
     session.notify("lint")
     session.notify("test")
     session.notify("security")

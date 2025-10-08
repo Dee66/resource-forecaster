@@ -143,7 +143,7 @@ poetry run python scripts/run_forecast.py --horizon 30d
 - **Recommendation Compliance**: Tracking of rightsizing implementations
 - **System Health**: Service availability and performance monitoring
 
-## 🎙️ **Interview-Ready Value Proposition**
+## 🎙️ **Value Proposition**
 
 ### **Technical Excellence**
 **Q: How does this deliver 40% cost reduction?**

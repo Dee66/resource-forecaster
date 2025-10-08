@@ -1,0 +1,18 @@
+{
+  "AlarmName": "ResourceForecaster-RMSE-Drift-prod",
+  "MetricName": "RMSE",
+  "Namespace": "ResourceForecaster/Metrics",
+  "Dimensions": [
+    {
+      "Name": "Environment",
+      "Value": "prod"
+    }
+  ],
+  "Statistic": "Average",
+  "Period": 300,
+  "EvaluationPeriods": 3,
+  "Threshold": 0.05,
+  "ComparisonOperator": "GreaterThanThreshold",
+  "TreatMissingData": "breaching",
+  "ActionsEnabled": true
+}

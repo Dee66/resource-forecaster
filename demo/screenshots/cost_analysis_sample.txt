@@ -1,0 +1,21 @@
+
+# Cost Analysis Dashboard Sample
+
+This is a placeholder for the Cost Analysis dashboard screenshot.
+
+## Key Metrics (Sample Data):
+
+### RMSE Trending:
+- Dev Environment: 2.3% (Target: <5%)  
+- Staging Environment: 1.8% (Target: <5%)
+- Production Environment: 2.7% (Target: <5%)
+
+### Cost Analysis:
+- Daily Variance: 2.1% (Target: <5%)
+- Forecast Accuracy: 97.2%
+- Monthly Savings Potential: $20,600
+
+## Dashboard URL:
+https://us-east-1.console.aws.amazon.com/cloudwatch/home?region=us-east-1#dashboards:ResourceForecaster-Cost-Analysis
+
+Note: Run `nox -s demo_screenshots` to capture live screenshots from CloudWatch.

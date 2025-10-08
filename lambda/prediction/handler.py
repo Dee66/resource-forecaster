@@ -82,10 +82,16 @@ def handle_prediction(request_data: Dict[str, Any]) -> Dict[str, Any]:
     try:
         # Import here to avoid cold start penalty
         from forecaster.inference import ForecasterHandler
-        from forecaster.config import ForecasterConfig
-        
-        # Load configuration
-        config = ForecasterConfig.from_env()
+        # Prefer the repository-wide YAML config when available
+        try:
+            from forecaster.config import load_config
+
+            config = load_config(os.environ.get("ENVIRONMENT", "dev"))
+        except Exception:
+            # Fall back to env-based loader
+            from forecaster.config import ForecasterConfig
+
+            config = ForecasterConfig.from_env()
         
         # Initialize handler
         handler = ForecasterHandler(config)

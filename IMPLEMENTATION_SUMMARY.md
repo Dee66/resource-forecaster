@@ -115,7 +115,7 @@ The **Resource Forecaster** MLOps plugin for FinOps & Capacity Planning has been
 - 🔄 **Deployment automation**
 - 🔄 **CI/CD pipelines**
 - 🔄 **Senior leader mandates**
-- 🔄 **Documentation and interview prep**
+- 🔄 **Documentation**
 
 ---
 

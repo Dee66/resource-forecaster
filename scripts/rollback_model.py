@@ -100,7 +100,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     if not args.bucket:
-        raise SystemExit("Missing S3 bucket. Provide --bucket or set S3_MODEL_ARTIFACTS_BUCKET.")
+        # Try repo config as a fallback
+        try:
+            from src.forecaster.config import load_config
+
+            cfg = load_config(args.env)
+            args.bucket = cfg.infrastructure.model_bucket
+        except Exception:
+            raise SystemExit("Missing S3 bucket. Provide --bucket or set S3_MODEL_ARTIFACTS_BUCKET.")
 
     pkgs = list_packages(args.bucket, args.env)
     if args.list:

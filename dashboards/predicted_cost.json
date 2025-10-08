@@ -1,0 +1,7 @@
+{
+  "envs": {
+    "dev": { "predicted_monthly": 120.50 },
+    "staging": { "predicted_monthly": 430.75 },
+    "prod": { "predicted_monthly": 950.00 }
+  }
+}

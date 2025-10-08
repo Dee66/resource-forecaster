@@ -6,6 +6,7 @@ proactive cost management and optimization recommendations.
 
 import json
 import logging
+import time
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass
@@ -13,6 +14,7 @@ import boto3
 from botocore.exceptions import ClientError
 
 from ..config import ForecasterConfig
+from ..audit import write_audit_event
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +50,8 @@ class BudgetAlertManager:
         self.ce = boto3.client('ce')  # Cost Explorer
         self.sns = boto3.client('sns')
         self.ssm = boto3.client('ssm')
+        # DynamoDB client for audit writes (injectable in tests)
+        self.dynamodb = boto3.client('dynamodb')
         
     def setup_forecaster_budgets(self, monthly_budget: float) -> Dict[str, Any]:
         """Setup comprehensive budgets for the forecaster system."""
@@ -326,6 +330,25 @@ class BudgetAlertManager:
             
             # Store alert data for dashboard
             self._store_alert_data(alert_response)
+
+            # Persist each recommendation to the audit table if configured
+            table_name = getattr(self.config, 'audit_table_name', None)
+            if table_name:
+                for rec in recommendations:
+                    ts = int(time.time())
+                    event = {
+                        'recommendation_id': f"{rec.recommendation_type}-{rec.resource_id}-{ts}",
+                        'timestamp': ts,
+                        'type': rec.recommendation_type,
+                        'resource_id': rec.resource_id,
+                        'action_required': rec.action_required,
+                        'projected_savings': rec.projected_savings,
+                        'priority': rec.priority
+                    }
+                    try:
+                        write_audit_event(table_name, event, dynamodb_client=self.dynamodb)
+                    except Exception:
+                        logger.exception("Failed to write audit event")
             
             return alert_response
             

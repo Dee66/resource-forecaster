@@ -16,13 +16,28 @@ logger.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
 
 
 def load_config_from_env():
-    """Load basic configuration from environment variables."""
-    # Return a simple dict for now to avoid import issues
-    return {
-        "model_bucket": os.environ.get("MODEL_BUCKET", "forecaster-models"),
-        "job_table": os.environ.get("JOB_TABLE", "forecaster-jobs"),
-        "environment": os.environ.get("ENVIRONMENT", "dev")
-    }
+    """Load basic configuration from repository config file or environment variables.
+
+    This prefers `config/<env>.yml` via `load_config` but falls back to simple
+    environment-variable-based defaults for portability in Lambda.
+    """
+    try:
+        from forecaster.config import load_config
+
+        env = os.environ.get("ENVIRONMENT", "dev")
+        cfg = load_config(env)
+        return {
+            "model_bucket": cfg.infrastructure.model_bucket,
+            "job_table": cfg.infrastructure.data_bucket if cfg.infrastructure.data_bucket else cfg.infrastructure.model_bucket,
+            "environment": cfg.environment,
+        }
+    except Exception:
+        # Fall back to env vars
+        return {
+            "model_bucket": os.environ.get("MODEL_BUCKET", "forecaster-models"),
+            "job_table": os.environ.get("JOB_TABLE", "forecaster-jobs"),
+            "environment": os.environ.get("ENVIRONMENT", "dev"),
+        }
 
 def lambda_handler(event: Dict[str, Any], context) -> Dict[str, Any]:
     """

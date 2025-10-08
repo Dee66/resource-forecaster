@@ -1,0 +1,105 @@
+{
+  "widgets": [
+    {
+      "type": "metric",
+      "x": 0,
+      "y": 0,
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "metrics": [
+          [
+            "ResourceForecaster/Metrics",
+            "RMSE",
+            "Environment",
+            "dev"
+          ],
+          [
+            "...",
+            "staging"
+          ],
+          [
+            "...",
+            "prod"
+          ]
+        ],
+        "view": "timeSeries",
+        "stacked": false,
+        "region": "us-east-1",
+        "title": "Forecast RMSE by Environment",
+        "period": 300,
+        "yAxis": {
+          "left": {
+            "min": 0
+          }
+        }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12,
+      "y": 0,
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "metrics": [
+          [
+            "ResourceForecaster/Metrics",
+            "MAPE",
+            "Environment",
+            "dev"
+          ],
+          [
+            "...",
+            "staging"
+          ],
+          [
+            "...",
+            "prod"
+          ]
+        ],
+        "view": "timeSeries",
+        "stacked": false,
+        "region": "us-east-1",
+        "title": "Forecast MAPE by Environment (%)",
+        "period": 300
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0,
+      "y": 6,
+      "width": 24,
+      "height": 6,
+      "properties": {
+        "metrics": [
+          [
+            "ResourceForecaster/Metrics",
+            "ModelAccuracy",
+            "Environment",
+            "dev"
+          ],
+          [
+            "...",
+            "staging"
+          ],
+          [
+            "...",
+            "prod"
+          ]
+        ],
+        "view": "timeSeries",
+        "stacked": false,
+        "region": "us-east-1",
+        "title": "Model Accuracy Trending (R\u00b2)",
+        "period": 300,
+        "yAxis": {
+          "left": {
+            "min": 0,
+            "max": 1
+          }
+        }
+      }
+    }
+  ]
+}
